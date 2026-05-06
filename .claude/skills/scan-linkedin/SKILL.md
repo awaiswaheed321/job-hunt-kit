@@ -24,7 +24,7 @@ User invoked with: $ARGUMENTS
 Read the file `.env` at the project root. Parse:
 - `LI_EMAIL` and `LI_PASSWORD` — LinkedIn credentials
 - `SEARCH_QUERIES` — comma-separated queries (fallback: "java developer hiring")
-- `DAYS_BACK` — how many days back to search (default: 1). Multiplied by 86400 for the LinkedIn datePosted param.
+- `DAYS_BACK` — how far back to search. Supports days+hours format: `1d`, `12h`, `1d3h`, `2d12h`. Plain integers are treated as days. Converted to seconds for the LinkedIn datePosted param.
 - `MAX_POSTS_PER_QUERY` — **target number of qualifying posts to save** per query (default: 20). Keep scrolling and reviewing until this many posts pass all filters and are saved to jobs.txt, or LinkedIn runs out of new posts to load.
 
 If $ARGUMENTS contains a search query, override `SEARCH_QUERIES` with it.
@@ -74,7 +74,12 @@ For each query in `SEARCH_QUERIES`, run the following loop. Track `saved_count =
 
 ### 3.1 Build the search URL
 ```
-dateParam = DAYS_BACK * 86400  (e.g. 1 day = 86400, 5 days = 432000)
+Parse DAYS_BACK into total seconds:
+  - "1d3h" → (1*86400) + (3*3600) = 97200
+  - "12h"  → 12*3600 = 43200
+  - "2d"   → 2*86400 = 172800
+  - plain integer (e.g. "1") → treated as days → 1*86400 = 86400
+dateParam = total seconds computed above
 URL = https://www.linkedin.com/search/results/content/?keywords=[URL-encoded query]&sortBy=%22date_posted%22&datePosted=%22r[dateParam]%22
 ```
 
