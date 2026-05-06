@@ -1,6 +1,6 @@
 ---
 name: scan-linkedin
-description: Search LinkedIn for Java/backend job posts, evaluate each against Awais's requirements, and save qualified posts to jobs.txt. Uses Playwright MCP to browse LinkedIn directly.
+description: Search LinkedIn for job posts, evaluate each against your requirements, and save qualified posts to jobs.txt. Uses Playwright MCP to browse LinkedIn directly.
 argument-hint: "[optional: custom search query]"
 allowed-tools: Read, Write, Bash, mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot, mcp__playwright__browser_click, mcp__playwright__browser_fill_form, mcp__playwright__browser_evaluate, mcp__playwright__browser_wait_for, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_press_key, mcp__playwright__browser_tabs
 ---
@@ -29,11 +29,19 @@ Read the file `.env` at the project root. Parse:
 
 If $ARGUMENTS contains a search query, override `SEARCH_QUERIES` with it.
 
+**Tip — use multiple targeted queries for better coverage:**
+```
+SEARCH_QUERIES=java developer hiring,java spring boot microservices hiring,senior java engineer W2,java developer sponsorship
+```
+
 ### 1.2 Read the requirements doc
 Read `personal-docs/job_requirements.md` in full. This is your evaluation guide — internalize the hard blockers, fit signals, edge cases, and output format before proceeding.
 
 ### 1.3 Read existing jobs.txt (for dedup)
-Read `jobs.txt` if it exists. Collect all `Poster:` lines to build a seen-set for deduplication. A post is a duplicate if the same poster URL + role title combination already appears.
+Read `jobs.txt` if it exists. Collect all `Poster:` lines to build a seen-set for deduplication. A post is a duplicate if the same poster URL + role title combination already appears in jobs.txt.
+
+### 1.4 Initialize session state
+Initialize an in-memory fingerprint set: `seen_fps = new Set()`. A fingerprint is `(authorUrl || authorName) + '|' + postBody.slice(0, 100)`. This tracks every post evaluated this session to prevent re-evaluation as the DOM grows.
 
 ---
 
@@ -62,13 +70,15 @@ If login is needed:
 
 ## Phase 3 — Search and Collect Posts
 
-For each query in `SEARCH_QUERIES`, run the following loop. Track `saved_count = 0` per query.
+For each query in `SEARCH_QUERIES`, run the following loop. Track `saved_count = 0` and `consecutive_empty_rounds = 0` per query.
 
 ### 3.1 Build the search URL
 ```
-dateParam = DAYS_BACK * 86400  (e.g. 1 day = r86400, 5 days = r432000)
-URL = https://www.linkedin.com/search/results/content/?keywords=[URL-encoded query]&datePosted=r[dateParam]&sortBy=date_posted
+dateParam = DAYS_BACK * 86400  (e.g. 1 day = 86400, 5 days = 432000)
+URL = https://www.linkedin.com/search/results/content/?keywords=[URL-encoded query]&sortBy=%22date_posted%22&datePosted=%22r[dateParam]%22
 ```
+
+Note: the `%22` quotes around values are required — LinkedIn ignores the filters without them.
 
 ### 3.2 Navigate and wait for cards
 1. Navigate to the search URL
@@ -77,13 +87,22 @@ URL = https://www.linkedin.com/search/results/content/?keywords=[URL-encoded que
    ```js
    () => Array.from(document.querySelectorAll('h2')).some(h => h.textContent.trim() === 'Feed post')
    ```
-4. If no cards appear: take a screenshot to `debug-no-results.png`, log it, and move to the next query
+4. If no cards appear: take a screenshot to `.playwright-mcp/debug-no-results.png`, log it, and move to the next query
 
 ### 3.3 Scroll loop — keep going until MAX_POSTS_PER_QUERY saved or no more posts
 
-Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR 3 consecutive End keypresses load no new cards:
+Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR `consecutive_empty_rounds >= 3`:
 
-**a) Expand truncated posts**
+**a) Press End 2–3 times to load more posts, then expand truncated ones**
+
+```
+Press End key (browser_press_key with key="End")
+Wait 1.5 seconds
+Press End key again
+Wait 1.5 seconds
+```
+
+Then expand "see more" buttons:
 ```js
 () => {
   document.querySelectorAll('button').forEach(btn => {
@@ -94,22 +113,17 @@ Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR 3 consecutive
 ```
 Wait 1 second.
 
-**b) Extract all post content**
+**Important:** LinkedIn's lazy-loader is triggered by real keyboard input, NOT by `window.scrollBy`. Always use `browser_press_key` with `key="End"` — never `window.scrollBy`.
+
+**b) Extract all post content — save to file**
+
+Use the `filename` parameter so the result doesn't flood the context window:
 ```js
 () => {
-  function timeToSeconds(t) {
-    if (!t || t === 'now' || t === 'just now') return 0;
-    const m = t.match(/^(\d+)\s*([smhdw])/);
-    if (!m) return 999999;
-    const n = parseInt(m[1]);
-    const unit = m[2];
-    return n * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[unit];
-  }
-
   const headings = Array.from(document.querySelectorAll('h2'))
     .filter(h => h.textContent.trim() === 'Feed post');
 
-  const posts = headings.map(h2 => {
+  return headings.map(h2 => {
     const container = h2.parentElement;
     const rawText = container.textContent.trim().replace(/^Feed post\s*/, '');
 
@@ -128,37 +142,35 @@ Wait 1 second.
     const timeMatch = header.match(/\b(now|just now|\d+\s*[smhdw])\b/i);
     const timePosted = timeMatch ? timeMatch[1].trim() : '';
 
-    const emailMatch = postBody.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    const emailMatch = postBody.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?=[^a-zA-Z0-9._+-]|$)/);
     const email = emailMatch ? emailMatch[0] : '';
 
-    return { authorName, authorUrl, postBody, email, timePosted, _sortKey: timeToSeconds(timePosted) };
-  });
+    const fp = (authorUrl || authorName) + '|' + postBody.slice(0, 100);
 
-  posts.sort((a, b) => a._sortKey - b._sortKey);
-  posts.forEach(p => delete p._sortKey);
-  return posts;
+    return { authorName, authorUrl, postBody: postBody.slice(0, 1200), email, timePosted, fp };
+  });
 }
 ```
 
-**c) Evaluate only NEW posts** (ones not seen in previous iterations of this loop — track by authorUrl+postBody fingerprint)
+Save to: `.playwright-mcp/posts-raw.json` (use the `filename` parameter of `browser_evaluate`).
 
-For every new post, apply judgment from `job_requirements.md`:
-1. Hard blockers → SKIP, log reason
-2. Assess fit — Strong / Moderate / Weak
-3. Check worth saving criteria
-4. Check dedup against jobs.txt seen-set
+Then read the file with the Read tool.
 
-If passes: append to jobs.txt immediately, increment `saved_count`, add to dedup set.
+**c) Identify and evaluate NEW posts only**
 
-**d) Scroll down using the End key**
-```
-Press End key (browser_press_key with key="End")
-Wait 2 seconds
-```
+For each post in the extracted list:
+1. Compute `fp = (authorUrl || authorName) + '|' + postBody.slice(0, 100)`
+2. If `fp` is already in `seen_fps` → skip (already processed this round or a prior one)
+3. Add `fp` to `seen_fps`
+4. Apply judgment from `job_requirements.md`:
+   - Hard blockers → SKIP, log reason
+   - Assess fit — Strong / Moderate / Weak
+   - Check dedup against jobs.txt seen-set (poster URL + role title)
+5. If passes all filters: append to jobs.txt immediately, increment `saved_count`, add to dedup set
 
-**Important:** LinkedIn's lazy-loader is triggered by real keyboard/scroll input, NOT by `window.scrollBy`. Always use `browser_press_key` with `key="End"` — never `window.scrollBy`.
+Track how many new fingerprints were processed this round. If zero new fingerprints found → increment `consecutive_empty_rounds`. If any new fingerprints found → reset `consecutive_empty_rounds = 0`.
 
-Count consecutive End presses that load zero new cards. Stop the loop after 3 such presses (LinkedIn has no more results).
+Stop the loop when `consecutive_empty_rounds >= 3` (LinkedIn has no more results) or `saved_count >= MAX_POSTS_PER_QUERY`.
 
 Move to next query after a 3–5 second pause.
 
@@ -228,6 +240,9 @@ If nothing was saved: say so clearly and suggest adjusting search queries or DAY
 - Ambiguous sponsorship language ("may support") → save with a flag, not skip
 - If LinkedIn shows a security challenge mid-scan: pause, tell the user, stop the skill
 - Do not close the Playwright browser between queries — reuse the session
-- Dedup is based on poster URL + role title, not post text
+- Dedup against jobs.txt is based on poster URL + role title
+- Session dedup uses fingerprints (`authorUrl|postBody[:100]`) — never re-evaluate a post already seen this session
 - **Never use `window.scrollBy` for scrolling** — use `browser_press_key` with `key="End"` only
+- **Always use the `filename` parameter** when calling `browser_evaluate` for post extraction — results exceed context limits if returned inline
 - Save each qualifying post immediately as it is found, don't wait until the end
+- Email regex must use the strict terminator form to avoid capturing trailing text: `(?=[^a-zA-Z0-9._+-]|$)`
