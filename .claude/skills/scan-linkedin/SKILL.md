@@ -93,16 +93,22 @@ Note: the `%22` quotes around values are required — LinkedIn ignores the filte
 
 Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR `consecutive_empty_rounds >= 3`:
 
-**a) Press End 2–3 times to load more posts, then expand truncated ones**
+**a) Scroll to load more posts, then expand truncated ones**
 
-```
-Press End key (browser_press_key with key="End")
-Wait 1.5 seconds
-Press End key again
-Wait 1.5 seconds
-```
+LinkedIn's content lives in `<main id="workspace">` (overflow-y: auto), not the document body. The document body has scrollHeight ~855px and never scrolls — pressing `End` or calling `window.scrollBy` does nothing. LinkedIn's lazy-loader is an IntersectionObserver watching a sentinel element relative to `main#workspace` as its root; only scrolling `main.scrollTop` triggers it.
 
-Then expand "see more" buttons:
+Use `browser_evaluate` to scroll the real container:
+```js
+() => {
+  const main = document.getElementById('workspace');
+  main.scrollTop = main.scrollHeight;
+  const h2s = Array.from(document.querySelectorAll('h2')).filter(h => h.textContent.trim() === 'Feed post');
+  return { postCount: h2s.length, scrollTop: main.scrollTop, scrollHeight: main.scrollHeight };
+}
+```
+Wait 2 seconds. Repeat 3–5 times until `postCount` stops increasing (plateau = LinkedIn exhausted results for this query).
+
+Then expand "see more" buttons once per round:
 ```js
 () => {
   document.querySelectorAll('button').forEach(btn => {
@@ -113,7 +119,7 @@ Then expand "see more" buttons:
 ```
 Wait 1 second.
 
-**Important:** LinkedIn's lazy-loader is triggered by real keyboard input, NOT by `window.scrollBy`. Always use `browser_press_key` with `key="End"` — never `window.scrollBy`.
+**Important:** Never use `browser_press_key` with `key="End"` — it fires against the document body and does not scroll the LinkedIn content container. Never use `window.scrollBy` either — same problem.
 
 **b) Extract all post content — save to file**
 
@@ -242,7 +248,7 @@ If nothing was saved: say so clearly and suggest adjusting search queries or DAY
 - Do not close the Playwright browser between queries — reuse the session
 - Dedup against jobs.txt is based on poster URL + role title
 - Session dedup uses fingerprints (`authorUrl|postBody[:100]`) — never re-evaluate a post already seen this session
-- **Never use `window.scrollBy` for scrolling** — use `browser_press_key` with `key="End"` only
+- **Never use `window.scrollBy` or `browser_press_key("End")` for scrolling** — both target the document body (scrollHeight ~855px, never scrolls). Always use `document.getElementById('workspace').scrollTop = main.scrollHeight` via `browser_evaluate` to scroll the real LinkedIn content container
 - **Always use the `filename` parameter** when calling `browser_evaluate` for post extraction — results exceed context limits if returned inline
 - Save each qualifying post immediately as it is found, don't wait until the end
 - Email regex must use the strict terminator form to avoid capturing trailing text: `(?=[^a-zA-Z0-9._+-]|$)`
