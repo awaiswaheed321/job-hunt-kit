@@ -239,7 +239,7 @@ Adjust categories and terms based on what the brief emphasizes and what the user
 - Confident and direct — write like a senior engineer, not a job seeker
 - No: "I am excited to apply", "I believe I would be a great fit", "Thank you for your consideration"
 - Yes: "The work aligns directly with...", "Here's what I'd bring to this problem"
-- 250–400 words total
+- 150–250 words total
 
 ---
 

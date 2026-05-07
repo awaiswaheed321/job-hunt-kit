@@ -158,7 +158,7 @@ Use the `filename` parameter so the result doesn't flood the context window:
 
     const fp = (authorUrl || authorName) + '|' + postBody.slice(0, 100);
 
-    return { authorName, authorUrl, postBody: postBody.slice(0, 1200), email, timePosted, fp };
+    return { authorName, authorUrl, postBody: postBody.slice(0, 3000), email, timePosted, fp };
   });
 }
 ```

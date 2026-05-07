@@ -21,22 +21,28 @@ User invoked with: $ARGUMENTS
 
 ## Phase 1 — Evaluate the JD
 
+### 1.1 Read requirements and tracker
+Read `personal-docs/job_requirements.md` — use its hard blockers, fit signals, and edge case rules as the evaluation guide. This is the single source of truth; do not rely on memory of the rules.
+
+Read `personal-docs/job_tracker.md` — check if this company + role combination has already been applied to. If an entry exists with status "Applied", stop and tell the user: "Already applied to [Role] at [Company] on [date]. Apply again?" Do not proceed unless the user confirms.
+
+Read `personal-docs/user.json` for `needs_sponsorship` and `relocation_open`.
+
+### 1.2 Extract JD details
 Read the job description from the conversation. Extract:
 - Company name, role title
 - Required and preferred skills, tech stack, keywords
 - Location, remote policy, sponsorship language
+- Recruiter email (if present in the post)
 
-**Hard blockers — stop and ask user before proceeding:**
-- "No sponsorship" / "must be authorized to work for any employer" — read `personal-docs/user.json` for `needs_sponsorship`. If true, flag before proceeding.
+### 1.3 Apply hard blockers
+Use the hard blockers defined in `personal-docs/job_requirements.md`. At minimum:
+- "No sponsorship" / "must be authorized to work for any employer" — if `needs_sponsorship` is true in user.json, stop and flag before proceeding.
 
-**Location — check user preference:** Read `personal-docs/user.json` for `relocation_open`. If true, proceed for location-specific roles and note the situation in the email. If false, flag if the role requires relocation.
+**Location:** If `relocation_open` is true in user.json, proceed for location-specific roles and note the situation in the email. If false, flag if the role requires relocation.
 
-**Fit signal — note and continue:**
-- Tech stack overlap vs required stack
-- Experience level match
-- Role type: backend-heavy (strong fit), full-stack (decent fit), frontend-heavy (weak fit)
-
-Output a one-line verdict: **Strong fit / Moderate fit / Weak fit** — then continue unless there's a hard blocker.
+### 1.4 Fit verdict
+Output a one-line verdict: **Strong fit / Moderate fit / Weak fit** — then continue regardless of fit level.
 
 ---
 
@@ -121,7 +127,7 @@ Best regards,
 - Confident, direct — write like a senior engineer, not a job seeker
 - No "I am excited to apply", "I believe I would be a great fit", "Thank you for your consideration"
 - No em dashes, no hyphens in email prose — use commas, colons, or restructure
-- 250-400 words
+- 150-250 words total
 
 **Subject line format:** `Application: [Role Title] — [Name]`
 
@@ -132,7 +138,9 @@ Show the email subject and body to the user for review before sending.
 ## Phase 4 — Send via Gmail SMTP
 
 ### 4.1 Get recruiter email
-If not captured from $ARGUMENTS, ask now: "What's the recruiter's email address?"
+If captured from $ARGUMENTS or from the JD, use it. If not provided and not in the JD, ask now: "What's the recruiter's email address?"
+
+If the job is marked "DM only" and no email exists anywhere: skip Phase 4 entirely. Tell the user: "No email found — resume generated. Send via LinkedIn DM to [posterName]." Then go to Phase 5.
 
 ### 4.2 Send via Python SMTP
 
