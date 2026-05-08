@@ -38,7 +38,9 @@ SEARCH_QUERIES=java developer hiring,java spring boot microservices hiring,senio
 Read `personal-docs/job_requirements.md` in full. This is your evaluation guide — internalize the hard blockers, fit signals, edge cases, and output format before proceeding.
 
 ### 1.3 Read existing jobs.txt (for dedup)
-Read `jobs.txt` if it exists. Collect all `Poster:` lines to build a seen-set for deduplication. A post is a duplicate if the same poster URL + role title combination already appears in jobs.txt.
+Read `jobs.txt` if it exists. Build two seen-sets for deduplication:
+- `seen_poster_role`: collect all `Poster:` + `Role:` line pairs → a post is a duplicate if same poster URL + role title already exists
+- `seen_company_role`: collect all `Company:` + `Role:` line pairs → a post is also a duplicate if same company + role title already exists (catches the same role posted by two different recruiters)
 
 ### 1.4 Initialize session state
 Initialize an in-memory fingerprint set: `seen_fps = new Set()`. A fingerprint is `(authorUrl || authorName) + '|' + postBody.slice(0, 100)`. This tracks every post evaluated this session to prevent re-evaluation as the DOM grows.
@@ -96,6 +98,8 @@ Note: the `%22` quotes around values are required — LinkedIn ignores the filte
 
 ### 3.3 Scroll loop — keep going until MAX_POSTS_PER_QUERY saved or no more posts
 
+> **CRITICAL — past execution failure:** Do NOT run the outer loop only once. After each extract+evaluate pass, check `saved_count` against `MAX_POSTS_PER_QUERY`. If the target is not met and LinkedIn still has more posts, scroll another batch and repeat. With a ~5–10% qualification rate, hitting MAX_POSTS_PER_QUERY=50 requires loading ~500–1000 raw posts across multiple batches. Never stop scrolling just because you've loaded and evaluated one batch of ~50 posts.
+
 Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR `consecutive_empty_rounds >= 3`:
 
 **a) Scroll to load more posts, then expand truncated ones**
@@ -111,7 +115,7 @@ Use `browser_evaluate` to scroll the real container:
   return { postCount: h2s.length, scrollTop: main.scrollTop, scrollHeight: main.scrollHeight };
 }
 ```
-Wait 2 seconds. Repeat 3–5 times until `postCount` stops increasing (plateau = LinkedIn exhausted results for this query).
+Wait 2 seconds. Repeat 3–5 times per batch to load many posts at once (batch scrolling is more efficient than one scroll per outer round). Stop scrolling the batch when `postCount` stops increasing — that signals LinkedIn has no more results for this batch.
 
 Then expand "see more" buttons once per round:
 ```js

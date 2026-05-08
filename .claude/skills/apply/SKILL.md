@@ -74,11 +74,13 @@ Copy `tools/template.py` into that folder as `generate.py`. Fill in:
 - `skills`: keep only rows relevant to the JD, reorder to match JD emphasis, max 6-7 rows
 - `experience`: select bullets per role following the balance rules
 
-**Bullet balance (always follow):**
-- Most recent role: 4-6 bullets (most important — give it the most space)
-- Second-most-recent: 3-4 bullets
-- Earlier roles: 2-3 bullets each
-- Oldest role: 1-2 bullets
+**Bullet balance — default to maximum bullets for a 2-page resume:**
+- Most recent role: 6 bullets (always use full complement)
+- Second-most-recent: 4 bullets
+- Earlier roles: 2 bullets each
+- Oldest role: 1 bullet
+
+Total target: 13 bullets → produces a clean 2-page resume. Reduce only if the JD scope is very narrow.
 
 `cover = None` unless user explicitly asked for a cover letter.
 

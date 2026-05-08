@@ -59,11 +59,13 @@ clients/                  ← drop job descriptions here
 5. Run `python3 "output/applied/[Company] - [Role] - [YYYY-MM-DD]/generate.py"` from the project root, then delete generate.py
 6. Update `personal-docs/job_tracker.md`
 
-**Bullet balance per role — always follow this:**
-- Most recent role: 4-6 bullets (give it the most space)
-- Second-most-recent: 3-4 bullets
-- Earlier roles: 2-3 bullets each
-- Oldest role: 1-2 bullets
+**Bullet balance per role — default to 13 bullets total for a 2-page resume:**
+- Most recent role: 6 bullets (always use full complement)
+- Second-most-recent: 4 bullets
+- Earlier roles: 2 bullets each
+- Oldest role: 1 bullet
+
+Total: 13 bullets → produces a clean 2-page resume. Reduce only if the JD scope is very narrow.
 
 **Skills section:** trim to 6-7 rows max. Only include categories relevant to the JD — drop the rest.
 
