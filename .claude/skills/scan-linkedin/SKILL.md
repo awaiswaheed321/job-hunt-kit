@@ -25,14 +25,9 @@ Read the file `.env` at the project root. Parse:
 - `LI_EMAIL` and `LI_PASSWORD` — LinkedIn credentials
 - `SEARCH_QUERIES` — comma-separated queries (fallback: "java developer hiring")
 - `DAYS_BACK` — how far back to search. Supports days+hours format: `1d`, `12h`, `1d3h`, `2d12h`. Plain integers are treated as days. Converted to seconds for the LinkedIn datePosted param.
-- `MAX_POSTS_PER_QUERY` — **target number of qualifying posts to save** per query (default: 20). Keep scrolling and reviewing until this many posts pass all filters and are saved to jobs.txt, or LinkedIn runs out of new posts to load.
+- `MAX_POSTS_PER_QUERY` — **target number of qualifying posts to save per query** (default: 20). Keep scrolling and reviewing until this many posts pass all filters and are saved to jobs.txt for that query, or LinkedIn runs out of new posts.
 
 If $ARGUMENTS contains a search query, override `SEARCH_QUERIES` with it.
-
-**Tip — use multiple targeted queries for better coverage:**
-```
-SEARCH_QUERIES=java developer hiring,java spring boot microservices hiring,senior java engineer W2,java developer sponsorship
-```
 
 ### 1.2 Read the requirements doc
 Read `personal-docs/job_requirements.md` in full. This is your evaluation guide — internalize the hard blockers, fit signals, edge cases, and output format before proceeding.
@@ -42,8 +37,44 @@ Read `jobs.txt` if it exists. Build two seen-sets for deduplication:
 - `seen_poster_role`: collect all `Poster:` + `Role:` line pairs → a post is a duplicate if same poster URL + role title already exists
 - `seen_company_role`: collect all `Company:` + `Role:` line pairs → a post is also a duplicate if same company + role title already exists (catches the same role posted by two different recruiters)
 
-### 1.4 Initialize session state
-Initialize an in-memory fingerprint set: `seen_fps = new Set()`. A fingerprint is `(authorUrl || authorName) + '|' + postBody.slice(0, 100)`. This tracks every post evaluated this session to prevent re-evaluation as the DOM grows.
+### 1.3.5 Read the no-authorized list
+Read `personal-docs/no_authorized_list.md` in full. Load all company/recruiter names into memory as a blocklist. Before saving any post to jobs.txt, check the company name and poster name against this list. Partial matches count (e.g. "Devcare Columbus" matches "Devcare"). If matched, skip with reason "no-authorized list".
+
+### 1.4 Initialize session state — resume or start fresh
+
+State is persisted to `.playwright-mcp/scan_state.json` so the scroll loop survives context compression mid-run.
+
+Read `.playwright-mcp/scan_state.json` if it exists (Read tool; if missing, treat as "no state").
+
+- If the file exists and `run_started_at` is **less than 4 hours ago** → **resume**: load all fields from the file. Log "Resuming interrupted scan from state file."
+- If the file exists but `run_started_at` is **4+ hours old** → **start fresh**: delete the file, initialize new state below.
+- If the file does not exist → **start fresh**: initialize new state below.
+
+**Fresh state:**
+```json
+{
+  "run_started_at": "<ISO timestamp of now>",
+  "seen_fps": [],
+  "total_saved_count": 0,
+  "query_saved_count": 0,
+  "consecutive_empty_rounds": 0,
+  "current_query_index": 0,
+  "total_posts_reviewed": 0,
+  "last_post_index": 0
+}
+```
+
+Write this fresh state to `.playwright-mcp/scan_state.json` immediately using the Write tool.
+
+**Field meanings:**
+- `seen_fps` — fingerprints of every post evaluated this session (for within-session dedup). Capped at 2000 on every write — if it exceeds 2000 entries, trim the oldest ones.
+- `total_saved_count` — cumulative saves across all queries this session (for the summary report).
+- `query_saved_count` — saves for the **current query only**. Reset to 0 when advancing to the next query. This is what gets compared against `MAX_POSTS_PER_QUERY`.
+- `consecutive_empty_rounds` — scroll failure counter; see Phase 3. Reset to 0 when advancing to a new query.
+- `last_post_index` — how many posts were in the DOM the last time extraction ran. Used for delta extraction. Reset to 0 when advancing to a new query or navigating to a new search.
+- `total_posts_reviewed` — cumulative count of unique posts evaluated (for the summary report).
+
+A fingerprint is `(authorUrl || authorName) + '|' + postBody.slice(0, 100)`. Load `seen_fps` array into an in-memory Set at the start of each batch for fast lookup.
 
 ---
 
@@ -72,7 +103,7 @@ If login is needed:
 
 ## Phase 3 — Search and Collect Posts
 
-For each query in `SEARCH_QUERIES`, run the following loop. Track `saved_count = 0` and `consecutive_empty_rounds = 0` per query.
+For each query in `SEARCH_QUERIES` (starting at `current_query_index` if resuming):
 
 ### 3.1 Build the search URL
 ```
@@ -96,18 +127,30 @@ Note: the `%22` quotes around values are required — LinkedIn ignores the filte
    ```
 4. If no cards appear: take a screenshot to `.playwright-mcp/debug-no-results.png`, log it, and move to the next query
 
-### 3.3 Scroll loop — keep going until MAX_POSTS_PER_QUERY saved or no more posts
+### 3.3 Scroll loop — keep going until `query_saved_count >= MAX_POSTS_PER_QUERY` or no more posts
 
-> **CRITICAL — past execution failure:** Do NOT run the outer loop only once. After each extract+evaluate pass, check `saved_count` against `MAX_POSTS_PER_QUERY`. If the target is not met and LinkedIn still has more posts, scroll another batch and repeat. With a ~5–10% qualification rate, hitting MAX_POSTS_PER_QUERY=50 requires loading ~500–1000 raw posts across multiple batches. Never stop scrolling just because you've loaded and evaluated one batch of ~50 posts.
+> **CRITICAL — past execution failure:** Do NOT run the outer loop only once. After each extract+evaluate pass, check `query_saved_count` against `MAX_POSTS_PER_QUERY`. If the target is not met and LinkedIn still has more posts, scroll another batch and repeat. With a ~5–10% qualification rate, hitting MAX_POSTS_PER_QUERY=50 requires loading ~500–1000 raw posts across many batches. Never stop scrolling just because you've loaded and evaluated one batch.
 
-Repeat the following until `saved_count >= MAX_POSTS_PER_QUERY` OR `consecutive_empty_rounds >= 3`:
+Repeat the following until `query_saved_count >= MAX_POSTS_PER_QUERY` OR `consecutive_empty_rounds >= 6`:
 
-**a) Scroll to load more posts, then expand truncated ones**
+**a) Record pre-scroll post count**
 
-LinkedIn's content lives in `<main id="workspace">` (overflow-y: auto), not the document body. The document body has scrollHeight ~855px and never scrolls — pressing `End` or calling `window.scrollBy` does nothing. LinkedIn's lazy-loader is an IntersectionObserver watching a sentinel element relative to `main#workspace` as its root; only scrolling `main.scrollTop` triggers it.
-
-Use `browser_evaluate` to scroll the real container:
 ```js
+() => {
+  const h2s = Array.from(document.querySelectorAll('h2')).filter(h => h.textContent.trim() === 'Feed post');
+  return h2s.length;
+}
+```
+Store as `post_count_before`.
+
+**b) Scroll to load more posts — with early exit**
+
+LinkedIn's content lives in `<main id="workspace">` (overflow-y: auto), not the document body. Only scrolling `main.scrollTop` triggers the lazy-loader. Never use `window.scrollBy` or `browser_press_key("End")` — they target the document body and do nothing.
+
+Run up to 5 scroll iterations. After each scroll, wait **3 seconds**, then check the count. If the count has not changed for **2 consecutive scrolls within this batch**, stop scrolling early — LinkedIn has paused loading.
+
+```js
+// Each scroll iteration:
 () => {
   const main = document.getElementById('workspace');
   main.scrollTop = main.scrollHeight;
@@ -115,9 +158,10 @@ Use `browser_evaluate` to scroll the real container:
   return { postCount: h2s.length, scrollTop: main.scrollTop, scrollHeight: main.scrollHeight };
 }
 ```
-Wait 2 seconds. Repeat 3–5 times per batch to load many posts at once (batch scrolling is more efficient than one scroll per outer round). Stop scrolling the batch when `postCount` stops increasing — that signals LinkedIn has no more results for this batch.
 
-Then expand "see more" buttons once per round:
+Record final `post_count_after` (last non-repeating count, or last count if all repeated).
+
+Then expand truncated posts once:
 ```js
 () => {
   document.querySelectorAll('button').forEach(btn => {
@@ -128,15 +172,28 @@ Then expand "see more" buttons once per round:
 ```
 Wait 1 second.
 
-**Important:** Never use `browser_press_key` with `key="End"` — it fires against the document body and does not scroll the LinkedIn content container. Never use `window.scrollBy` either — same problem.
+**c) Update `consecutive_empty_rounds`**
 
-**b) Extract all post content — save to file**
+```
+if post_count_after > post_count_before:
+    consecutive_empty_rounds = 0   # LinkedIn loaded new posts
+else:
+    consecutive_empty_rounds += 1  # LinkedIn loaded nothing new
+```
 
-Use the `filename` parameter so the result doesn't flood the context window:
+This is the ONLY correct signal for "LinkedIn is exhausted." A batch where posts loaded but were all blockers/duplicates must NOT increment this counter — those were real results, just not qualifying ones.
+
+**d) Delta extraction — only new posts**
+
+Read `last_post_index` from current state.
+
+Run `browser_evaluate` with this function, substituting the actual numeric value of `last_post_index` in place of `LAST_POST_INDEX`:
+
 ```js
 () => {
-  const headings = Array.from(document.querySelectorAll('h2'))
+  const allHeadings = Array.from(document.querySelectorAll('h2'))
     .filter(h => h.textContent.trim() === 'Feed post');
+  const headings = allHeadings.slice(LAST_POST_INDEX); // only posts not yet seen
 
   return headings.map(h2 => {
     const container = h2.parentElement;
@@ -167,33 +224,50 @@ Use the `filename` parameter so the result doesn't flood the context window:
 }
 ```
 
-Save to: `.playwright-mcp/posts-raw.json` (use the `filename` parameter of `browser_evaluate`).
+Save to `.playwright-mcp/posts-raw.json` (use the `filename` parameter). Then read the file with the Read tool — it now contains only the new posts from this batch (typically 10–40 entries, readable in one call).
 
-Then read the file with the Read tool.
+After reading: update `last_post_index` in state to `last_post_index + number_of_new_posts_extracted` (i.e., `post_count_after`).
 
-**c) Identify and evaluate NEW posts only**
+**e) Identify and evaluate NEW posts only**
 
 For each post in the extracted list:
 1. Compute `fp = (authorUrl || authorName) + '|' + postBody.slice(0, 100)`
-2. If `fp` is already in `seen_fps` → skip (already processed this round or a prior one)
+2. If `fp` is already in `seen_fps` → skip silently (timestamp-shifted duplicate)
 3. Add `fp` to `seen_fps`
-4. Apply judgment from `job_requirements.md`:
-   - Hard blockers → SKIP, log reason
-   - Assess fit — Strong / Moderate / Weak
-   - Check dedup against jobs.txt seen-set (poster URL + role title)
-5. If passes all filters: append to jobs.txt immediately, increment `saved_count`, add to dedup set
+4. **Evaluate** against `job_requirements.md`:
+   - Hard blockers → log one-liner: `SKIP [AuthorName]: <reason>` (e.g., `SKIP Anisha K: No OPT + Lead role`)
+   - Weak fit → log one-liner: `SKIP [AuthorName]: weak fit (<reason>)`
+   - No-authorized list match → log one-liner: `SKIP [AuthorName]: no-authorized list`
+   - Duplicate → log one-liner: `SKIP [AuthorName]: duplicate`
+   - Qualifying → save to jobs.txt immediately (see Phase 4), increment `query_saved_count` and `total_saved_count`, add poster+role to dedup sets, log: `SAVE [AuthorName]: <Role> @ <Company> — <Fit>`
+5. Increment `total_posts_reviewed` for every post with a new fingerprint, regardless of outcome
 
-Track how many new fingerprints were processed this round. If zero new fingerprints found → increment `consecutive_empty_rounds`. If any new fingerprints found → reset `consecutive_empty_rounds = 0`.
+**f) Persist state to disk after every batch**
 
-Stop the loop when `consecutive_empty_rounds >= 3` (LinkedIn has no more results) or `saved_count >= MAX_POSTS_PER_QUERY`.
+```json
+{
+  "run_started_at": "<original ISO timestamp — do not update>",
+  "seen_fps": ["<all fps seen so far, capped at 2000 — trim oldest if over>"],
+  "total_saved_count": <cumulative saves across all queries>,
+  "query_saved_count": <saves for the current query only>,
+  "consecutive_empty_rounds": <current value>,
+  "current_query_index": <current query index>,
+  "total_posts_reviewed": <current value>,
+  "last_post_index": <updated value>
+}
+```
 
-Move to next query after a 3–5 second pause.
+This write must happen after every batch. It is what allows the loop to survive context compression.
+
+Stop the loop when `consecutive_empty_rounds >= 6` OR `query_saved_count >= MAX_POSTS_PER_QUERY`.
+
+**Advancing to next query:** pause 3–5 seconds, then reset `consecutive_empty_rounds = 0`, `query_saved_count = 0`, `last_post_index = 0`, increment `current_query_index`. Write updated state to disk.
 
 ---
 
 ## Phase 4 — Save to jobs.txt
 
-Append each qualifying post as it is found (don't batch — write immediately after evaluation):
+Append each qualifying post as it is found (write immediately, not in batches):
 
 ```
 ---
@@ -220,9 +294,14 @@ Today's date is in the system context — use it for the `Date:` field.
 
 ---
 
-## Phase 5 — Report
+## Phase 5 — Cleanup and Report
 
-After all queries are done, print a summary:
+After all queries are done, delete the state file:
+```bash
+rm -f .playwright-mcp/scan_state.json
+```
+
+Print a summary:
 
 ```
 Scan complete.
@@ -257,7 +336,15 @@ If nothing was saved: say so clearly and suggest adjusting search queries or DAY
 - Do not close the Playwright browser between queries — reuse the session
 - Dedup against jobs.txt is based on poster URL + role title
 - Session dedup uses fingerprints (`authorUrl|postBody[:100]`) — never re-evaluate a post already seen this session
-- **Never use `window.scrollBy` or `browser_press_key("End")` for scrolling** — both target the document body (scrollHeight ~855px, never scrolls). Always use `document.getElementById('workspace').scrollTop = main.scrollHeight` via `browser_evaluate` to scroll the real LinkedIn content container
-- **Always use the `filename` parameter** when calling `browser_evaluate` for post extraction — results exceed context limits if returned inline
+- **Never use `window.scrollBy` or `browser_press_key("End")` for scrolling** — both target the document body (~855px, never scrolls). Always use `document.getElementById('workspace').scrollTop = main.scrollHeight` via `browser_evaluate`
+- **Always use the `filename` parameter** when calling `browser_evaluate` for post extraction
+- **Delta extraction**: always substitute the current `last_post_index` value into the extraction JS. A value of 0 extracts all posts (correct for first batch of a query). Reset `last_post_index` to 0 when navigating to a new query.
+- **`consecutive_empty_rounds` tracks scroll failures only** — increment only when `post_count_after == post_count_before`. A batch where posts loaded but were all blockers/duplicates must NOT increment this counter.
+- **`query_saved_count` resets per query** — it is the counter compared against `MAX_POSTS_PER_QUERY`. `total_saved_count` accumulates across all queries and is used only for the final report.
+- **`seen_fps` cap**: trim to last 2000 entries on every state write to prevent unbounded growth.
+- **State file is session-scoped** — `run_started_at` < 4 hours = resume; ≥ 4 hours = start fresh automatically.
+- **Write state to disk after every batch** — never rely solely on in-context memory.
+- **Evaluation output**: one-liner for skips (`SKIP [Name]: reason`), full format only for saves. Do not write verbose reasoning for every skip.
+- **Early scroll exit within a batch**: stop scrolling if the post count fails to increase for 2 consecutive scrolls within the same batch. This saves ~6–9 seconds when LinkedIn is near-exhausted.
 - Save each qualifying post immediately as it is found, don't wait until the end
-- Email regex must use the strict terminator form to avoid capturing trailing text: `(?=[^a-zA-Z0-9._+-]|$)`
+- Email regex must use the strict terminator form: `(?=[^a-zA-Z0-9._+-]|$)`
